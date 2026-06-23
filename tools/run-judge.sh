@@ -9,10 +9,16 @@
 # typed on a command line, never echoed, and never written to any file by this
 # script. It is exported only into the judge's process (via exec) and dies with it.
 #
-# Usage:
+# Post-split paths: the eval inputs (prompts/, probes/, rubrics/) ship in THIS tool repo,
+# alongside the scripts — NOT in the data repo you run from. Reference an input by its path in
+# the tool repo (absolute, or relative to it via "$(dirname "$0")/.."); --results-dir and the
+# input result JSONs (--a/--b) live in the data repo.
+#
+# Usage (run from the data repo):
+#   T="$(cd "$(dirname "$0")/.." && pwd)"   # this tool repo's checkout
 #   ./tools/run-judge.sh --mode pairwise --a A.json --b B.json --judge-model <id> \
-#       --reference-prompt prompts/operator-copilot-rca-system-prompt.md \
-#       --results-dir <dir>
+#       --reference-prompt "$T/prompts/operator-copilot-rca-system-prompt.md" \
+#       --results-dir phase-3-optimization-and-quantization/week-14/results
 #   ./tools/run-judge.sh ... --dry-run        # no key needed; prints prompts only
 #   ANTHROPIC_KEY_FILE=/other/path ./tools/run-judge.sh ...   # override key location
 #

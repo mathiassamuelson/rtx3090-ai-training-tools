@@ -111,29 +111,26 @@ ts_utc()  { date -u +%Y-%m-%dT%H:%M:%SZ; }    # ISO 8601 — for JSON metadata f
 ts_file() { date -u +%Y%m%dT%H%M%SZ; }        # colon-free compact stamp — for default filenames
 log()     { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
-# Anchor to the SCRIPT's own location, NOT cwd. tools/ is one level under the repo root.
-# This is invariant to (a) the directory the script is invoked from and (b) where the repo
-# is cloned. The prior `git rev-parse --show-toplevel` resolved the toplevel of whichever
-# checkout cwd happened to sit in — so running this from inside a sibling repo (e.g. a separate
-# stack/config checkout) retargeted RESULTS_DIR, GIT_SHA, and the launcher paths at the wrong
-# repo. (BASH_SOURCE
-# is reliable here because the script is always invoked as a file, never sourced/piped.)
+# SCRIPT_DIR/ROOT anchor to THIS script's repo (the tool repo T), used ONLY to locate the
+# sibling launcher (start-vllm.sh) and to record the tool repo's git SHA. Anchoring via
+# BASH_SOURCE is invariant to cwd and to where the repo is cloned. (BASH_SOURCE is reliable
+# here because the script is always invoked as a file, never sourced/piped.)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-[[ -z "$RESULTS_DIR" ]] && RESULTS_DIR="$ROOT/phase-3-optimization-and-quantization/$WEEK/results"
+
+# RESULTS go into the DATA repo, not the tool repo: a relative default resolves against the CWD
+# (run this from the data repo R). Anchoring results to $ROOT would write into T and re-dirty the
+# tool repo — exactly what the repo split removed. Pass --results-dir for an explicit location.
+[[ -z "$RESULTS_DIR" ]] && RESULTS_DIR="phase-3-optimization-and-quantization/$WEEK/results"
 mkdir -p "$RESULTS_DIR"
 
+# Provenance = the TOOL repo's (T's) SHA + dirty flag, anchored to the script's repo via $ROOT.
+# T never holds results post-split, so the dirty check is a plain whole-tree check — no results
+# exclude/path-classification (that workaround was for the pre-split commingling, now removed).
 GIT_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
-# Dirty-tree check EXCLUDES the results dir: result files are expected to be uncommitted at
-# write time, so a dirty results/ is normal and not a provenance problem. Only changes OUTSIDE
-# results/ (code, tools, configs) mean the recorded SHA won't reflect what actually ran. The
-# exclude is applied only when results/ sits inside the repo; an external --results-dir isn't
-# in the tree anyway, so the plain whole-tree check still applies there.
-DIRTY_PATHSPEC=(.)
-case "$RESULTS_DIR" in "$ROOT"/*) DIRTY_PATHSPEC=(. ":(exclude)${RESULTS_DIR#"$ROOT"/}") ;; esac
-if [[ -n "$(git -C "$ROOT" status --porcelain -- "${DIRTY_PATHSPEC[@]}" 2>/dev/null)" ]]; then
-  log "WARNING: working tree is DIRTY outside results/ — recorded git SHA ($GIT_SHA) will not be clean."
-  log "         Commit code/tool changes before a measured run (commit-before-running discipline)."
+if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+  log "WARNING: tool repo (T) is DIRTY — recorded git SHA ($GIT_SHA) will not pin committed code."
+  log "         Commit tool changes before a measured run (commit-before-running discipline)."
 fi
 
 # functional health probe — CHAT endpoint only (raw completions => Gemma-4 gibberish)
@@ -368,7 +365,7 @@ doc = {
     "experiment": "boot_choreography",
     "mode": os.environ["MODE"],
     "timestamp_utc": os.environ["TS"],
-    "git_sha": os.environ["GIT_SHA"],
+    "tool_git_sha": os.environ["GIT_SHA"],
     "image_requested": os.environ["IMAGE"],
     **({"host": host_label} if host_label else {}),
     "probe": {"endpoint": "/v1/chat/completions",

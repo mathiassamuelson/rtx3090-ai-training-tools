@@ -116,8 +116,6 @@ import argparse
 import asyncio
 import json
 import platform
-import socket
-import subprocess
 import sys
 import time
 import uuid
@@ -128,52 +126,18 @@ from typing import Optional
 
 import httpx
 
+from provenance import tool_provenance  # records the TOOL repo (T) SHA, never cwd (R)
+
 
 BACKENDS = ("llamacpp", "vllm-openai")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # v4: provenance moved to tool_git_sha/tool_git_dirty (shared module);
+                    # results paths now resolve against CWD, not the tool repo.
 
-# Repo root = parent of tools/ (this script lives in tools/). Anchoring the default results
-# directory and the git provenance to the SCRIPT's location — not the CWD — keeps the output
-# location and the recorded git SHA invariant to where the sweep is launched from. (Mirrors
-# the BASH_SOURCE/repo-root anchoring used in tools/start-stack.sh.)
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def anchor_path(p: Path) -> Path:
-    """Resolve a relative path against the repo root (script location), not the CWD.
-    Absolute paths are returned unchanged, so callers retain an explicit escape hatch."""
-    return p if p.is_absolute() else (REPO_ROOT / p)
-
-
-def get_git_info(repo_root: Path, exclude: Optional[Path] = None) -> dict:
-    """Return git SHA and dirty-tree status for the script's repo.
-
-    Anchored to `repo_root` (via `git -C`), NOT the current working directory, so the
-    recorded SHA reflects the code that actually ran regardless of where the sweep was
-    launched. The dirty check excludes `exclude` (the results dir) when it lies inside the
-    repo: result files are expected to be uncommitted at write time, so only changes
-    OUTSIDE results/ mean the recorded SHA won't reflect the code/tools.
-    """
-    git = ["git", "-C", str(repo_root)]
-    try:
-        sha = subprocess.check_output(
-            git + ["rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-        status_cmd = git + ["status", "--porcelain", "--", "."]
-        if exclude is not None:
-            try:
-                rel = exclude.resolve().relative_to(repo_root.resolve())
-                status_cmd.append(f":(exclude){rel.as_posix()}")
-            except ValueError:
-                pass  # exclude is outside the repo — nothing to exclude, whole-tree check
-        dirty = bool(subprocess.check_output(
-            status_cmd,
-            stderr=subprocess.DEVNULL,
-        ).decode().strip())
-        return {"git_sha": sha, "dirty": dirty}
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {"git_sha": None, "dirty": None}
+# Post-split: this tool lives in T (rtx3090-ai-training-tools) but is run from R, and results
+# are written into R. Git provenance is the TOOL repo's SHA (anchored to this file via the shared
+# provenance module — see tool_provenance), while output paths resolve against the CWD like any
+# ordinary CLI tool. The two were conflated pre-split (both keyed off the script's repo root);
+# they are deliberately separate now so a relative --results-dir never writes into T.
 
 
 def slugify_model_name(name: str) -> str:
@@ -680,16 +644,22 @@ def main():
         default=None,
         help="Output JSON file. Default: "
              "<results-dir>/throughput_sweep_<backend>_<model>_c<N>[_<placement>]_<timestamp>.json "
-             "(placement segment included only when not 'na'). A relative path is anchored to "
-             "the repo root, same as --results-dir.",
+             "(placement segment included only when not 'na'). A relative path resolves against "
+             "the CWD, same as --results-dir.",
     )
     parser.add_argument(
         "--results-dir",
         default="results",
-        help="Directory for the default output filename (default: %(default)s). A RELATIVE "
-             "path resolves against the repo root (the script's location), NOT the current "
-             "directory, so output lands in the same place regardless of where you launch "
-             "from. Pass an absolute path to write elsewhere.",
+        help="Directory for the default output filename (default: %(default)s). A relative path "
+             "resolves against the current working directory (run from the data repo). Pass an "
+             "absolute path to write elsewhere.",
+    )
+    parser.add_argument(
+        "--host-label",
+        default="",
+        help="Optional host identifier recorded under run.host in the result JSON. Default "
+             "empty -> the field is omitted. Set explicitly to tag a run; never auto-scraped "
+             "(no hostname leak into committed results).",
     )
     args = parser.parse_args()
 
@@ -718,10 +688,10 @@ def main():
 
     # Resolve output path (model name and concurrency level both in the default filename
     # so runs against different models or concurrency levels never silently overwrite).
-    # Relative paths anchor to the repo root, not the CWD, so output lands in the same place
-    # regardless of where the sweep is launched from (see anchor_path).
+    # Relative paths resolve against the CWD (you run from the data repo R); pass an absolute
+    # path to write elsewhere. Provenance is the tool repo's SHA regardless (tool_provenance).
     if args.output:
-        output_path = anchor_path(Path(args.output))
+        output_path = Path(args.output)
     else:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         slug = slugify_model_name(model_name)
@@ -730,7 +700,7 @@ def main():
             f"throughput_sweep_{args.backend}_{slug}_c{args.concurrency}"
             f"{placement_seg}_{timestamp}.json"
         )
-        output_path = anchor_path(Path(args.results_dir)) / filename
+        output_path = Path(args.results_dir) / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Calibrate tokenizer behavior for this model
@@ -779,12 +749,12 @@ def main():
         "schema_version": SCHEMA_VERSION,
         "script": {
             "name": "throughput_sweep.py",
-            "git": get_git_info(REPO_ROOT, exclude=output_path.parent),
+            "git": tool_provenance(),
         },
         "run": {
             "run_id": str(uuid.uuid4()),
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "hostname": socket.gethostname(),
+            **({"host": args.host_label} if args.host_label else {}),
             "platform": platform.platform(),
             "python_version": platform.python_version(),
         },

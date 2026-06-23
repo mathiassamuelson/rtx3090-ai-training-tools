@@ -40,7 +40,6 @@ Usage:
 import argparse
 import asyncio
 import json
-import subprocess
 import sys
 import time
 import uuid
@@ -50,20 +49,26 @@ from typing import Optional
 
 import httpx
 
+from provenance import tool_provenance  # records the TOOL repo (T) SHA, never cwd (R)
+
 # ---- repo anchoring (script-location-derived, NOT cwd) -------------------------------------
+# Only the sibling sweep tool is resolved against the script location (it ships alongside in T).
+# Results paths resolve against the CWD (see --results-dir); git provenance is the tool repo's
+# SHA via tool_provenance — never the cwd, never a results-dir anchored into T.
 SCRIPT_DIR = Path(__file__).resolve().parent          # .../tools
-REPO_ROOT = SCRIPT_DIR.parent                         # repo root
 DEFAULT_SWEEP = SCRIPT_DIR / "throughput_sweep.py"
-DEFAULT_RESULTS_DIR = REPO_ROOT / "phase-3-optimization-and-quantization" / "week-13" / "results"
 
 # ---- direction presets (deployment topology; every field overridable on the CLI) ----------
 # aggressor target: {url, gpus, via_pool}. gpus is the saturation-evidence sample only.
+# captures_nginx: whether this direction floods the load-balancer pool (so the nginx upstream
+# split is worth capturing). The container NAME is never hardcoded here — it comes from
+# --nginx-container (default below) and is used only when captures_nginx is True.
 PRESETS = {
     "31b": {
         "victim_endpoint": "http://localhost:8000",
         "victim_gpus": [0, 2],
         "aggressors": [{"url": "http://localhost:8080", "gpus": [1, 3], "via_pool": True}],
-        "nginx_container": "nginx-frontdoor",
+        "captures_nginx": True,
     },
     "12b": {
         "victim_endpoint": "http://localhost:8001",
@@ -72,7 +77,7 @@ PRESETS = {
             {"url": "http://localhost:8003", "gpus": [3], "via_pool": False},
             {"url": "http://localhost:8000", "gpus": [0, 2], "via_pool": False},
         ],
-        "nginx_container": None,
+        "captures_nginx": False,
     },
 }
 
@@ -85,19 +90,6 @@ def slugify(name: str) -> str:
 
 def ts_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def git_info() -> dict:
-    try:
-        sha = subprocess.check_output(
-            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
-        dirty = bool(subprocess.check_output(
-            ["git", "-C", str(REPO_ROOT), "status", "--porcelain"], stderr=subprocess.DEVNULL
-        ).decode().strip())
-        return {"git_sha": sha, "dirty": dirty}
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {"git_sha": None, "dirty": None}
 
 
 async def sh(*cmd: str, timeout: float = 30.0) -> str:
@@ -266,7 +258,7 @@ async def amain(args):
     victim_endpoint = args.victim_endpoint or preset["victim_endpoint"]
     victim_gpus = preset["victim_gpus"]
     aggressors = preset["aggressors"]
-    nginx_container = preset["nginx_container"]
+    nginx_container = args.nginx_container if preset["captures_nginx"] else None
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -375,8 +367,8 @@ async def amain(args):
         "experiment": "cross_tier_interference",
         "direction": args.victim,
         "timestamp_utc": start_iso,
-        "git": git_info(),
-        "host": __import__("socket").gethostname(),
+        "git": tool_provenance(),
+        **({"host": args.host_label} if args.host_label else {}),
         "victim": {"model": victim_model, "endpoint": victim_endpoint,
                    "gpus": victim_gpus, "probe": "throughput_sweep.py c=1"},
         "aggressors": agg_summary,
@@ -416,7 +408,19 @@ def main():
                     help="Tier to probe for interference while the others are saturated.")
     ap.add_argument("--victim-endpoint", default=None, help="Override victim endpoint URL.")
     ap.add_argument("--sweep", default=str(DEFAULT_SWEEP), help="Path to throughput_sweep.py.")
-    ap.add_argument("--results-dir", default=str(DEFAULT_RESULTS_DIR))
+    ap.add_argument("--results-dir", default=".",
+                    help="Directory for result JSONs (default: CWD). A relative path resolves "
+                         "against the current working directory; run from the data repo and pass "
+                         "the week's results dir, e.g. "
+                         "phase-3-optimization-and-quantization/week-14/results.")
+    ap.add_argument("--nginx-container", default="nginx-frontdoor",
+                    help="Load-balancer container whose upstream split is read in pool-flooding "
+                         "directions (default: %(default)s). Used only when the direction floods "
+                         "the pool; never hardcoded in the presets.")
+    ap.add_argument("--host-label", default="",
+                    help="Optional host identifier recorded under 'host' in the result JSON. "
+                         "Default empty -> field omitted. Set explicitly to tag a run; never "
+                         "auto-scraped (no hostname leak into committed results).")
     ap.add_argument("--baseline", default=None,
                     help="Solo baseline sweep JSON. Default: "
                          "<results-dir>/interference_solo_baseline_victim-<victim-model>.json")
