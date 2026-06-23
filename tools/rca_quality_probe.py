@@ -35,7 +35,7 @@ from pathlib import Path
 
 import httpx
 
-from provenance import tool_provenance  # records the TOOL repo (T) SHA, never cwd (R)
+from provenance import tool_provenance, resolve_input  # tool repo (T) SHA + bundled-input paths
 
 SCHEMA_VERSION = 3
 
@@ -175,8 +175,12 @@ def main() -> int:
                     help="Model name sent to the server and recorded everywhere. Never hardcoded.")
     ap.add_argument("--base-url", default="http://localhost:8000/v1",
                     help="OpenAI-compatible base URL of the target server.")
-    ap.add_argument("--system-prompt", required=True,
-                    help="Path to the system-prompt file (read as raw text).")
+    ap.add_argument("--system-prompt",
+                    default="prompts/operator-copilot-rca-system-prompt.md",
+                    help="Path to the system-prompt file (read as raw text). A relative path is "
+                         "tried against the CWD, then the tool repo, so the bundled prompts/ "
+                         "resolve from anywhere. Default: the orchestrator operator-copilot "
+                         "prompt bundled with the tools (override for the worker tiers).")
     ap.add_argument("--results-dir", default=".",
                     help="Directory for the output JSON (created if missing).")
     ap.add_argument("--output", default=None,
@@ -185,18 +189,22 @@ def main() -> int:
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--probes-file", default=None,
-                    help="Optional JSON file [{id,title,user}, ...] overriding the default probes.")
+                    help="Optional JSON file [{id,title,user}, ...] overriding the default probes. "
+                         "Relative paths resolve against the CWD then the tool repo (bundled "
+                         "probes/).")
     args = ap.parse_args()
 
-    sys_path = Path(args.system_prompt)
+    sys_path = resolve_input(args.system_prompt)
     if not sys_path.is_file():
-        print(f"ERROR: system prompt not found: {sys_path}", file=sys.stderr)
+        print(f"ERROR: system prompt not found: {args.system_prompt} (resolved: {sys_path})",
+              file=sys.stderr)
         return 2
     system_prompt = sys_path.read_text(encoding="utf-8")
 
     if args.probes_file:
-        probes = json.loads(Path(args.probes_file).read_text(encoding="utf-8"))
-        probe_source = args.probes_file
+        probes_path = resolve_input(args.probes_file)
+        probes = json.loads(probes_path.read_text(encoding="utf-8"))
+        probe_source = str(probes_path)
     else:
         probes = DEFAULT_PROBES
         probe_source = "builtin:DEFAULT_PROBES"

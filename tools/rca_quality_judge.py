@@ -47,7 +47,7 @@ from typing import Any
 
 import httpx
 
-from provenance import tool_provenance  # records the TOOL repo (T) SHA, never cwd (R)
+from provenance import tool_provenance, resolve_input  # tool repo (T) SHA + bundled-input paths
 
 # --------------------------------------------------------------------------------------
 # Defaults
@@ -173,7 +173,7 @@ def index_by_id(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def load_rubric(path: str | None) -> list[dict[str, str]]:
     if path is None:
         return DEFAULT_RUBRIC
-    spec = json.loads(Path(path).read_text())
+    spec = json.loads(resolve_input(path).read_text())
     axes = spec.get("axes", spec)  # accept either {"axes":[...]} or a bare list
     if not isinstance(axes, list) or not all(
         isinstance(a, dict) and "key" in a and "definition" in a for a in axes
@@ -563,8 +563,11 @@ def main() -> int:
                     help="Judge model id sent to the Anthropic API and recorded everywhere.")
     ap.add_argument("--reference-prompt",
                     help="Path to the operator-copilot system prompt; given to the judge as "
-                         "grounds for scope/guardrail scoring. Recommended.")
-    ap.add_argument("--rubric-file", help="JSON overriding the default rubric axes.")
+                         "grounds for scope/guardrail scoring. Recommended. Relative paths "
+                         "resolve against the CWD then the tool repo (bundled prompts/).")
+    ap.add_argument("--rubric-file",
+                    help="JSON overriding the default rubric axes. Relative paths resolve "
+                         "against the CWD then the tool repo (bundled rubrics/).")
     ap.add_argument("--results-dir", default=".", help="Directory for the output JSON.")
     ap.add_argument("--output", help="Explicit output path (default includes model + judge names).")
     ap.add_argument("--limit", type=int, default=0, help="Score only the first N probes (debug/cost).")
@@ -578,7 +581,7 @@ def main() -> int:
         ap.error("pointwise mode requires --a (the single result file)")
 
     rubric = load_rubric(args.rubric_file)
-    reference_prompt = Path(args.reference_prompt).read_text() if args.reference_prompt else None
+    reference_prompt = resolve_input(args.reference_prompt).read_text() if args.reference_prompt else None
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key and not args.dry_run:

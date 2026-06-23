@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """
-provenance.py — single source of truth for tool-repo git provenance.
+provenance.py — tool-repo-anchored helpers shared across the toolchain.
 
-THE INVARIANT (the reason this module exists): a result's provenance is the SHA of the
-*tool* repo (rtx3090-ai-training-tools, "T") — the repo that holds the capture/judge/check
-code and the eval inputs (prompts/probes/rubrics) that produced the result. It is NEVER the
-SHA of the current working directory.
+Two concerns, one anchor. Everything here is keyed off THIS module's __file__ (which lives in
+T/tools/), so the answers are invariant to the current working directory:
 
-Post-split, the tools live in T but are run with cwd = R (rtx3090-ai-training) because
-results are written into R. A cwd-based git read would therefore record R's SHA — pinning
-the data repo instead of the code that produced the data, and re-introducing the very
-dirty-by-sibling provenance friction the split was meant to remove. By anchoring to THIS
-module's __file__ (which lives in T/tools/), every tool that imports it records T's SHA
-regardless of where it is invoked from.
+  * tool_provenance() — the git SHA + dirty flag of the *tool* repo (T,
+    rtx3090-ai-training-tools), the repo that holds the code + eval inputs that produced a
+    result. NEVER the SHA of the cwd. Post-split the tools run with cwd = R
+    (rtx3090-ai-training) because results are written into R; a cwd-based git read would pin the
+    data repo instead of the code, re-introducing the dirty-by-sibling friction the split
+    removed. Anchoring to __file__ records T's SHA from anywhere.
 
-The returned keys (`tool_git_*`) name the fact honestly: this is the tool repo's state, and a
+  * resolve_input() / tool_repo_root() — locate the bundled eval inputs (prompts/, probes/,
+    rubrics/) that ship in T alongside the tools, so a caller can pass a bare repo-relative path
+    (e.g. "prompts/operator-copilot-rca-system-prompt.md") and it resolves whether or not the
+    cwd happens to contain it.
+
+The provenance keys (`tool_git_*`) name the fact honestly: this is the tool repo's state, and a
 dirty flag here is the discipline gate that now matters — R being dirty at capture time is
 expected and irrelevant to what produced the result.
 
 Usage (sibling import; tools run as `python3 tools/<tool>.py`, so tools/ is sys.path[0]):
 
-    from provenance import tool_provenance
-    prov = tool_provenance()   # {"tool_git_sha": "...", "tool_git_dirty": False}
-    out = {..., **prov}
+    from provenance import tool_provenance, resolve_input
+    prov = tool_provenance()                  # {"tool_git_sha": "...", "tool_git_dirty": False}
+    sp   = resolve_input(args.system_prompt)   # Path, found in cwd or in the tool repo
 """
 
 from __future__ import annotations
@@ -57,3 +60,24 @@ def tool_provenance() -> dict[str, Any]:
     if not sha:
         return {"tool_git_sha": None, "tool_git_dirty": None}
     return {"tool_git_sha": sha, "tool_git_dirty": bool(_git(["status", "--porcelain"]))}
+
+
+def tool_repo_root() -> Path:
+    """Filesystem root of the tool repo (T) — the parent of tools/."""
+    return _TOOL_REPO_DIR.parent
+
+
+def resolve_input(path_str: str) -> Path:
+    """Resolve a bundled-input path (a prompt / probe / rubric file).
+
+    Resolution order: an absolute path is used as given; a relative path is used as-is if it
+    exists relative to the CWD, otherwise it is resolved against the tool repo root — so the
+    eval inputs that ship in T (prompts/, probes/, rubrics/) resolve from any working directory
+    without the caller spelling out the tool-repo path. If neither location exists, the path is
+    returned unchanged so the caller's not-found error names exactly what was requested.
+    """
+    p = Path(path_str)
+    if p.is_absolute() or p.exists():
+        return p
+    candidate = tool_repo_root() / p
+    return candidate if candidate.exists() else p
