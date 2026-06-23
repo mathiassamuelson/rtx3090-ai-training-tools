@@ -1,0 +1,19 @@
+{
+  "name": "worker-rca-rubric",
+  "applies_to": "component RCA workers (payment-service, order-service, ...). Shared verbatim across components; the worker role is component-agnostic.",
+  "note": "Only the 'axes' array is consumed by rca_quality_judge.py (--rubric-file). Pass the relevant worker system prompt as --reference-prompt so the scope axis can be judged against the worker's declared lane. Output-format conformance is intentionally NOT an axis here: the judge is instructed to ignore formatting, so strict-JSON-contract conformance is measured deterministically instead, not by the LLM judge.",
+  "axes": [
+    {
+      "key": "extraction_fidelity",
+      "definition": "Does the response surface the in-scope signals actually present in the provided evidence, each backed by VERBATIM evidence (exact log lines, metric points, or rows) copied from the task rather than paraphrased or invented? Reward faithful, complete extraction tied to real evidence. Penalize missed signals that the evidence clearly contains, paraphrased or fabricated evidence strings, and claims the provided data does not support."
+    },
+    {
+      "key": "scope_discipline",
+      "definition": "Judged against the reference worker system prompt: does the response stay strictly within the worker's assigned component? A cross-component signal must be flagged tersely as an out-of-scope observation WITHOUT being diagnosed and WITHOUT being promoted into an in-scope finding; a component that is clearly nominal must yield no invented findings. Reward correct routing of foreign signals and restraint when the component is clean. Penalize diagnosing other components, claiming another component's symptoms as the worker's own, fabricating findings to appear useful, and silently dropping a clear cross-component signal."
+    },
+    {
+      "key": "signal_correctness",
+      "definition": "Are the surfaced signals correctly identified and classified, with confidence calibrated to the evidence? Reward correct mechanism identification, correct application of distinctions the component's domain demands (e.g. an infrastructure error vs a business outcome, or an outbound-dependency cause vs an internal one), and confidence proportional to evidential strength. Penalize misidentification, conflating distinct failure classes, and confidence that is over- or under-stated relative to the evidence."
+    }
+  ]
+}

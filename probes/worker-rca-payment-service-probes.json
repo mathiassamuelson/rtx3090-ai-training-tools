@@ -1,0 +1,32 @@
+[
+  {
+    "id": "p1_pool_saturation_logs",
+    "title": "PSP pool saturation from logs (clean high-confidence extraction)",
+    "user": "read_logs payment-service -10m:\n14:31:02 INFO  charge.start order=9f2a psp_pool_in_use=48/50\n14:31:05 WARN  psp_pool_in_use=50/50 waiters=12\n14:31:05 ERROR charge.fail order=9f3b reason=pool_acquire_timeout waited_ms=3001\n14:31:06 ERROR charge.fail order=9f3c reason=pool_acquire_timeout waited_ms=3002\n14:31:09 INFO  psp_call order=9f1e upstream_ms=2780\n\nExtract the payment-service signal(s)."
+  },
+  {
+    "id": "p2_decline_vs_error_sql",
+    "title": "Decline-vs-error discrimination from a charges query",
+    "user": "query_sql payments:\nSELECT status, error_code, count(*) FROM charges\nWHERE created_at > now() - interval '15 min' GROUP BY 1,2 ORDER BY 3 DESC;\n\n status     | error_code           | count\n------------+----------------------+-------\n DECLINED   | insufficient_funds   |   412\n CAPTURED   |                      |   388\n DECLINED   | fraud_rule           |    73\n ERRORED    | pool_acquire_timeout |    29\n AUTHORIZED |                      |    14\n\nExtract the payment-service signal(s)."
+  },
+  {
+    "id": "p3_credential_auth_failure",
+    "title": "Credential / auth failure pattern (uniform, not latency)",
+    "user": "read_logs payment-service -10m filter=psp:\n14:50:01 ERROR psp_call order=a11 status=401 psp_msg=\"invalid api key\" upstream_ms=42\n14:50:01 ERROR psp_call order=a12 status=401 psp_msg=\"invalid api key\" upstream_ms=39\n14:50:02 ERROR psp_call order=a13 status=401 psp_msg=\"invalid api key\" upstream_ms=44\n14:50:02 ERROR psp_call order=a14 status=401 psp_msg=\"invalid api key\" upstream_ms=41\npsp_pool_in_use=6/50 waiters=0\n\nExtract the payment-service signal(s)."
+  },
+  {
+    "id": "p4_scope_discipline_foreign_signals",
+    "title": "Scope trap: payment-service clean, foreign Redis/inventory signals present",
+    "user": "The orchestrator handed you this mixed evidence bundle while investigating a checkout incident. Some of it may not concern payment-service.\n\nread_logs payment-service -10m:\n14:40:00 INFO  charge.start order=d01 psp_pool_in_use=9/50\n14:40:00 INFO  psp_call order=d01 upstream_ms=121 status=200\n14:40:01 INFO  charge.capture order=d01 psp_ref=ch_91c\n\nget_metrics redis redis_command_latency_p99 -10m step=2m:\n14:31 0.4ms  14:33 0.4ms  14:35 38ms  14:37 41ms  14:39 44ms\n\nget_metrics inventory-service http_request_duration_p99 -10m step=2m:\n14:31 22ms  14:35 210ms  14:39 240ms\n\nExtract the payment-service signal(s)."
+  },
+  {
+    "id": "p5_nominal_with_decline",
+    "title": "Nominal payment-service with a benign decline (do not fabricate a finding)",
+    "user": "read_logs payment-service -15m filter=charge:\n14:10:11 INFO  charge.capture order=e01 psp_ref=ch_a1 upstream_ms=119\n14:10:14 INFO  charge.decline order=e02 reason=insufficient_funds\n14:10:19 INFO  charge.capture order=e03 psp_ref=ch_a2 upstream_ms=131\n14:10:25 INFO  charge.capture order=e04 psp_ref=ch_a3 upstream_ms=124\n\nget_metrics payment-service pool_in_use -15m step=3m: 8  11  14  9  12\nget_metrics payment-service error_rate -15m step=3m: 0.002  0.002  0.001  0.002  0.002\n\nExtract the payment-service signal(s)."
+  },
+  {
+    "id": "p6_pool_exhaustion_metrics",
+    "title": "Pool exhaustion from metric series (time-series extraction, no logs)",
+    "user": "get_metrics payment-service pool_in_use -20m step=2m:\n14:20 12  14:22 15  14:24 28  14:26 44  14:28 50  14:30 50  14:32 50  14:34 50\n\nget_metrics payment-service pool_waiters -20m step=2m:\n14:20 0  14:22 0  14:24 0  14:26 3  14:28 19  14:30 41  14:32 58  14:34 63\n\nget_metrics payment-service http_request_duration_p99 -20m step=2m:\n14:20 140ms  14:24 180ms  14:26 900ms  14:28 2600ms  14:30 3000ms  14:34 3000ms\n\nExtract the payment-service signal(s)."
+  }
+]

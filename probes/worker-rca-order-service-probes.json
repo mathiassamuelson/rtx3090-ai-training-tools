@@ -1,0 +1,32 @@
+[
+  {
+    "id": "o1_internal_pool_slowquery",
+    "title": "Internal latency: DB pool contention from a slow query (in-lane)",
+    "user": "get_metrics order-service http_request_duration_p99 -20m step=2m:\n14:00 78ms  14:04 82ms  14:08 240ms  14:12 610ms  14:16 1400ms  14:20 1900ms\n\nget_metrics order-service pool_waiters -20m step=2m:\n14:00 0  14:04 0  14:08 2  14:12 9  14:16 18  14:20 26\n\nget_metrics order-service http_requests_total -20m step=2m (req/s):\n14:00 520  14:08 530  14:12 525  14:20 515\n\nget_metrics payment-service http_request_duration_p99 -20m step=2m:\n14:00 121ms  14:08 119ms  14:16 123ms  14:20 120ms\n\nread_logs order-service -5m filter=slow_query:\n14:19:51 WARN slow_query schema=orders dur_ms=1820 plan=seqscan rows=2.1M predicate=\"status='PENDING_PAYMENT'\"\n\nExtract the order-service signal(s)."
+  },
+  {
+    "id": "o2_outbound_vs_internal_discriminator",
+    "title": "Outbound-vs-internal discriminator: order-service p99 tracking payment-service",
+    "user": "get_metrics order-service http_request_duration_p99 -15m step=1m:\n14:30 79ms  14:33 410ms  14:36 1600ms  14:39 2100ms\n\nget_metrics payment-service http_request_duration_p99 -15m step=1m:\n14:30 130ms  14:33 380ms  14:36 1500ms  14:39 2050ms\n\nget_metrics order-service pool_waiters -15m step=1m:\n14:30 0  14:33 0  14:36 1  14:39 1\n\nget_metrics order-service gc_pause_ms -15m step=1m:\n14:30 9  14:33 11  14:36 8  14:39 10\n\nread_logs order-service -5m filter=payment:\n14:38:40 INFO order=k01 state=PENDING_PAYMENT awaiting payment-service\n14:38:43 WARN order=k02 payment_call_ms=3001 state=PENDING_PAYMENT\n\nExtract the order-service signal(s)."
+  },
+  {
+    "id": "o3_lifecycle_stall_sql",
+    "title": "Lifecycle stall: orders accumulating in PENDING_PAYMENT (orders query)",
+    "user": "query_sql orders:\nSELECT status, count(*), max(now() - updated_at) AS oldest\nFROM orders WHERE updated_at > now() - interval '30 min' GROUP BY 1 ORDER BY 2 DESC;\n\n status          | count | oldest\n-----------------+-------+----------\n PENDING_PAYMENT |   842 | 00:14:32\n PAID            |   210 | 00:00:03\n FULFILLED       |   198 | 00:00:30\n STOCK_RESERVED  |    45 | 00:00:11\n\nExtract the order-service signal(s)."
+  },
+  {
+    "id": "o4_scope_discipline_foreign_signals",
+    "title": "Scope trap: order-service clean, foreign Redis/inventory signals present",
+    "user": "The orchestrator handed you this mixed evidence bundle while investigating a checkout incident. Some of it may not concern order-service.\n\nget_metrics order-service http_request_duration_p99 -10m step=2m:\n14:30 80ms  14:32 82ms  14:34 79ms  14:36 81ms  14:38 80ms\n\nget_metrics order-service pool_waiters -10m step=2m:\n14:30 0  14:32 0  14:34 1  14:36 0  14:38 0\n\nget_metrics redis redis_command_latency_p99 -10m step=2m:\n14:30 0.4ms  14:32 0.4ms  14:34 35ms  14:36 39ms  14:38 44ms\n\nread_logs inventory-service -10m filter=cache:\n14:35:02 WARN redis_timeout falling_back_to_postgres sku=AB12\n14:35:09 WARN redis_timeout falling_back_to_postgres sku=CD34\n\nExtract the order-service signal(s)."
+  },
+  {
+    "id": "o5_nominal_with_cancellation",
+    "title": "Nominal order-service with a benign cancellation (do not fabricate a finding)",
+    "user": "read_logs order-service -15m filter=state:\n14:10:11 INFO order=m01 CREATED->STOCK_RESERVED->PENDING_PAYMENT->PAID->FULFILLED\n14:10:30 INFO order=m02 CREATED->CANCELLED reason=customer_abort\n14:10:41 INFO order=m03 CREATED->STOCK_RESERVED->PENDING_PAYMENT->PAID\n\nget_metrics order-service http_request_duration_p99 -15m step=3m: 78 80 81 79 80\nget_metrics order-service error_rate -15m step=3m: 0.001 0.001 0.002 0.001 0.001\n\nExtract the order-service signal(s)."
+  },
+  {
+    "id": "o6_internal_gc_pauses",
+    "title": "Internal latency: GC pauses correlated with p99, outbound normal",
+    "user": "get_metrics order-service http_request_duration_p99 -15m step=1m:\n14:00 80ms  14:05 300ms  14:09 95ms  14:12 480ms  14:14 110ms\n\nget_metrics order-service gc_pause_ms -15m step=1m:\n14:00 8  14:05 280  14:09 12  14:12 410  14:14 15\n\nget_metrics payment-service http_request_duration_p99 -15m step=1m:\n14:00 120ms  14:05 125ms  14:09 122ms  14:12 119ms  14:14 121ms\n\nget_metrics order-service pool_waiters -15m step=1m:\n14:00 0  14:05 0  14:09 0  14:12 1  14:14 0\n\nExtract the order-service signal(s)."
+  }
+]
