@@ -14,6 +14,7 @@
 #   ./start-vllm.sh --model <hf-id> --mode tp --size 2 --max-model-len 65536
 #   ./start-vllm.sh --mode tp --size 2 --profiler-cudagraphs off   # recover CUDA-graph KV tax
 #   ./start-vllm.sh ... -- --enforce-eager   # anything after `--` is passed to vLLM verbatim
+#   ./start-vllm.sh --help                   # print this header and exit 0
 #
 # Deterministic stage->GPU placement (--device-order):
 #   Docker's `--gpus` device-list ORDER does NOT reliably control in-container CUDA
@@ -63,6 +64,11 @@ IMAGE="vllm/vllm-openai:v0.21.0"
 NAME=""                   # container name; default derived below from mode/size
 SHM_SIZE="16G"
 
+# ---- Help -------------------------------------------------------------------------
+# Render the comment-block header as usage text. Matches vllm-bringup-checks.sh's
+# extraction so both scripts present help identically.
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//'; }
+
 # ---- Parse flags ------------------------------------------------------------------
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -78,8 +84,9 @@ while [[ $# -gt 0 ]]; do
     --port)               PORT="$2"; shift 2 ;;
     --image)              IMAGE="$2"; shift 2 ;;
     --name)               NAME="$2"; shift 2 ;;
+    -h|--help)            usage; exit 0 ;;
     --)                   shift; EXTRA_ARGS=("$@"); break ;;
-    *) echo "[error] unknown argument: $1" >&2; exit 2 ;;
+    *) echo "[error] unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
 
