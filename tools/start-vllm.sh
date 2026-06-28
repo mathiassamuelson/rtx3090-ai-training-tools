@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
 #
-# start-vllm.sh — launch a vLLM OpenAI-compatible server for the Week 11 TP-vs-PP
-# experiment. Parameterized over model and parallelism strategy so the same script
-# serves TP=2, PP=2, and the PP=4 stretch run rather than hardcoding one config.
+# start-vllm.sh — launch a vLLM OpenAI-compatible server for the operator-copilot stack.
+# Parameterized over model and parallelism strategy so the same script serves the
+# production roles (orchestrator + two workers) AND the TP/PP/device-order experiments.
 #
-# Zero-arg default: RedHatAI/gemma-4-31B-it-FP8-block, TP=2, on the NVLink pair (GPUs 0,2).
+# ROLE PRESETS (positional first arg; sets defaults, explicit flags still override):
+#   orchestrator   31B-QAT  TP=2  GPUs 0,2 (NVLink pair)   port 8000  MML 131072  util 0.95
+#   worker1        12B-QAT  TP=1  GPU 1                    port 8001  MML 131072  util 0.90
+#   worker2        12B-QAT  TP=1  GPU 3                    port 8002  MML 131072  util 0.90
+# No role (and no --model) -> prints this help and exits 0. There is no silent zero-arg
+# launch: pick a role for the standard configs, or drive it manually with --model + flags.
 #
 # Usage:
-#   ./start-vllm.sh                          # FP8 31B, TP=2, GPUs 0,2 (default)
-#   ./start-vllm.sh --mode pp --size 2       # PP=2 on the NVLink pair
-#   ./start-vllm.sh --mode pp --size 4 --gpus all   # PP=4 stretch, naive placement (stage i -> GPU i)
-#   ./start-vllm.sh --mode pp --size 4 --device-order 0,2,1,3   # PP=4, STEERED: NVLink pair adjacent
-#   ./start-vllm.sh --model <hf-id> --mode tp --size 2 --max-model-len 65536
+#   ./start-vllm.sh orchestrator             # 31B-QAT TP=2 on the NVLink pair (GPUs 0,2)
+#   ./start-vllm.sh worker1                  # 12B-QAT TP=1 on GPU 1, port 8001
+#   ./start-vllm.sh worker2                  # 12B-QAT TP=1 on GPU 3, port 8002
+#   ./start-vllm.sh worker1 --max-model-len 65536    # role default overridden by explicit flag
+#   ./start-vllm.sh --model <hf-id> --mode tp --size 2 --max-model-len 65536   # full manual
+#   ./start-vllm.sh --model <hf-id> --mode pp --size 4 --device-order 0,2,1,3  # PP=4, steered
 #   ./start-vllm.sh --mode tp --size 2 --profiler-cudagraphs off   # recover CUDA-graph KV tax
-#   ./start-vllm.sh ... -- --enforce-eager   # anything after `--` is passed to vLLM verbatim
+#   ./start-vllm.sh <role-or-flags> -- --enforce-eager   # anything after `--` -> vLLM verbatim
 #   ./start-vllm.sh --help                   # print this header and exit 0
+#
+# Role MML rationale: 131072 = the models' max_position_embeddings validation boundary.
+# The 31B-QAT KV ceiling is ~218K at util 0.95 (131K serves at 1.48x concurrency); the 12B
+# KV pool is flat across MML, so 131K costs nothing. The 131K-262K range is quality-
+# unvalidated for both — raise only with a long-context quality evaluation in hand.
 #
 # Deterministic stage->GPU placement (--device-order):
 #   Docker's `--gpus` device-list ORDER does NOT reliably control in-container CUDA
@@ -31,12 +42,11 @@
 # CUDA-graph KV tax (--profiler-cudagraphs):
 #   Since vLLM v0.21.0, CUDA-graph memory profiling reserves capture memory BEFORE the
 #   KV pool, so a nominal --gpu-memory-utilization is effectively lower for KV purposes
-#   (boot log reports the equivalent). This is the default ("on") and is the held-constant
-#   condition for the Week 11 Days 1-5 baseline; leave it at the default to reproduce
-#   those runs. Setting "off" injects VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0, which
-#   disables the estimate and returns the reserved memory to the KV pool (recovers the
-#   tax). This CHANGES held-constant: only use "off" as a deliberate, named variable in a
-#   tax-recovery boot, never as a silent default. One variable per boot.
+#   (boot log reports the equivalent). This is the default ("on"). Setting "off" injects
+#   VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0, which disables the estimate and returns
+#   the reserved memory to the KV pool (recovers the tax). This CHANGES held-constant:
+#   only use "off" as a deliberate, named variable in a tax-recovery boot, never as a
+#   silent default. One variable per boot.
 #
 # Ampere notes (RTX 3090, SM 8.6):
 #   - FP8 KV cache requires SM 8.9+, so --kv-cache-dtype auto resolves to BF16. Do not
@@ -45,31 +55,68 @@
 #
 # Deployment note: this is a TEXT-ONLY deployment. --limit-mm-per-prompt zeroes image,
 # audio, AND video so vLLM does not reserve an encoder cache budget for modalities we
-# never use; that budget is reclaimed into the KV pool. Held constant across all
-# TP-vs-PP runs.
+# never use; that budget is reclaimed into the KV pool. Held constant across all runs.
 #
 set -euo pipefail
 
-# ---- Defaults (override via flags) ------------------------------------------------
-MODEL="RedHatAI/gemma-4-31B-it-FP8-block"
+# ---- Defaults (override via flags; role presets below also set several of these) --
+MODEL=""                  # no silent default model; set by a role preset or --model
 MODE="tp"                 # tp | pp
 SIZE="2"                  # parallel degree
 GPUS="0,2"                # comma list of device ids, or the literal "all"
 DEVICE_ORDER=""           # optional in-container CUDA_VISIBLE_DEVICES order for deterministic PP stage placement
-MAX_MODEL_LEN="131072"    # PROVISIONAL — final value set after Day 2 KV characterization
+MAX_MODEL_LEN="131072"    # role presets keep this; manual runs override as needed
 GPU_MEM_UTIL="0.90"
 PROFILER_CUDAGRAPHS="on"  # on (default, baseline) | off (recover CUDA-graph KV tax)
 PORT="8000"
-IMAGE="vllm/vllm-openai:v0.21.0"
-NAME=""                   # container name; default derived below from mode/size
+IMAGE="vllm/vllm-openai:v0.23.0"
+NAME=""                   # container name; role presets set it, else derived below from mode/size
 SHM_SIZE="16G"
+
+ORCH_MODEL="google/gemma-4-31B-it-qat-w4a16-ct"
+WORKER_MODEL="google/gemma-4-12B-it-qat-w4a16-ct"
+ROLE=""                   # set if a known role preset was selected (for the intent echo)
 
 # ---- Help -------------------------------------------------------------------------
 # Render the comment-block header as usage text. Matches vllm-bringup-checks.sh's
 # extraction so both scripts present help identically.
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//'; }
 
-# ---- Parse flags ------------------------------------------------------------------
+# ---- Role preset (optional positional first arg) ----------------------------------
+# Consumed BEFORE the flag loop so explicit flags can still override any preset value.
+# A bare run with no role and no flags falls through to the no-config check -> usage.
+apply_role() {
+  case "$1" in
+    orchestrator)
+      ROLE="orchestrator"; MODEL="$ORCH_MODEL"
+      MODE="tp"; SIZE="2"; GPUS="0,2"; PORT="8000"
+      MAX_MODEL_LEN="131072"; GPU_MEM_UTIL="0.95"
+      NAME="vllm-orchestrator-31b" ;;
+    worker1)
+      ROLE="worker1"; MODEL="$WORKER_MODEL"
+      MODE="tp"; SIZE="1"; GPUS="1"; PORT="8001"
+      MAX_MODEL_LEN="131072"; GPU_MEM_UTIL="0.90"
+      NAME="vllm-worker1-12b-gpu1" ;;
+    worker2)
+      ROLE="worker2"; MODEL="$WORKER_MODEL"
+      MODE="tp"; SIZE="1"; GPUS="3"; PORT="8002"
+      MAX_MODEL_LEN="131072"; GPU_MEM_UTIL="0.90"
+      NAME="vllm-worker2-12b-gpu3" ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+if [[ $# -gt 0 && "$1" != -* && "$1" != "--" ]]; then
+  if apply_role "$1"; then
+    shift
+  else
+    echo "[error] unknown role: $1 (expected orchestrator|worker1|worker2, or use --model for manual)" >&2
+    exit 2
+  fi
+fi
+
+# ---- Parse flags (override role/defaults) -----------------------------------------
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,6 +137,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---- No config at all -> show usage (no silent launch) ----------------------------
+if [[ -z "$MODEL" ]]; then
+  usage
+  echo "[error] no role and no --model: pick a role (orchestrator|worker1|worker2) or pass --model." >&2
+  exit 2
+fi
+
 # ---- Resolve parallelism flag -----------------------------------------------------
 case "$MODE" in
   tp) PARALLEL_FLAG=(--tensor-parallel-size "$SIZE") ;;
@@ -98,7 +152,7 @@ case "$MODE" in
 esac
 
 # ---- Resolve CUDA-graph profiler (KV tax) -----------------------------------------
-# "on"  -> default vLLM behavior (estimate enabled); the Days 1-5 baseline.
+# "on"  -> default vLLM behavior (estimate enabled).
 # "off" -> inject VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0 to recover the tax.
 PROFILER_ENV_ARGS=()
 case "$PROFILER_CUDAGRAPHS" in
@@ -137,6 +191,7 @@ fi
 
 # ---- Echo resolved config (identity capture) --------------------------------------
 echo "=== start-vllm.sh ==="
+[[ -n "$ROLE" ]] && echo "  role          : ${ROLE}"
 echo "  model         : ${MODEL}"
 echo "  parallelism   : ${MODE}=${SIZE}"
 echo "  gpus          : ${GPUS}"
@@ -145,12 +200,12 @@ if [[ -n "$DEVICE_ORDER" ]]; then
 else
   echo "  device-order  : (none — naive: stage i -> physical GPU i)"
 fi
-echo "  max-model-len : ${MAX_MODEL_LEN}  (provisional until Day 2 characterization)"
+echo "  max-model-len : ${MAX_MODEL_LEN}"
 echo "  gpu-mem-util  : ${GPU_MEM_UTIL}"
 if [[ "$PROFILER_CUDAGRAPHS" == "off" ]]; then
   echo "  cudagraph prof: OFF  (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0 — KV tax recovered; NON-baseline)"
 else
-  echo "  cudagraph prof: on   (vLLM default; Days 1-5 baseline)"
+  echo "  cudagraph prof: on   (vLLM default)"
 fi
 echo "  image         : ${IMAGE}"
 echo "  container     : ${NAME}"
@@ -162,7 +217,7 @@ echo "====================="
 # ---- Launch -----------------------------------------------------------------------
 # Foreground (--rm): Ctrl-C stops and removes the container.
 TTY_FLAGS=(-i)
-[ -t 1 ] && TTY_FLAGS=(-it)      # interactive terminal -> -it (Week 11 behavior, unchanged)
+[ -t 1 ] && TTY_FLAGS=(-it)      # interactive terminal -> -it
                                  # non-interactive (orchestrator/nohup/CI) -> -i, no TTY required
 exec docker run "${TTY_FLAGS[@]}" --rm \
   --name "${NAME}" \
