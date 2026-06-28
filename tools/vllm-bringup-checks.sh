@@ -15,16 +15,19 @@
 # Exit code: 0 if all CRITICAL checks pass, else 1. WARN-level findings do not fail the run.
 #
 # Usage:
-#   tools/vllm-bringup-checks.sh --name gemma4-12b-native-test --port 8001 \
+#   tools/vllm-bringup-checks.sh --container-name gemma4-12b-native-test --port 8001 \
 #       --expected-model google/gemma-4-12B-it-qat-w4a16-ct \
 #       --expected-gpus 1 --log /tmp/12b_v0230_native_startup.log
 #
-#   tools/vllm-bringup-checks.sh --name gemma4-12b-bf16 --port 8002 \
+#   tools/vllm-bringup-checks.sh --container-name gemma4-12b-bf16 --port 8002 \
 #       --expected-gpus 1,3 --no-smoke      # e.g. while still warming
+#
+#   (--name is accepted as a DEPRECATED alias for --container-name; it still works but
+#    prints a warning. Prefer --container-name in new invocations.)
 
 set -uo pipefail
 
-NAME=""
+CONTAINER_NAME=""
 HOST="127.0.0.1"
 PORT="8000"
 EXPECTED_MODEL=""
@@ -46,7 +49,9 @@ usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --name)            NAME="$2"; shift 2;;
+    --container-name)  CONTAINER_NAME="$2"; shift 2;;
+    --name)            printf 'WARNING: --name is deprecated; use --container-name\n' >&2
+                       CONTAINER_NAME="$2"; shift 2;;
     --host)            HOST="$2"; shift 2;;
     --port)            PORT="$2"; shift 2;;
     --expected-model)  EXPECTED_MODEL="$2"; shift 2;;
@@ -60,7 +65,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$NAME" ] || { printf 'ERROR: --name is required\n' >&2; exit 2; }
+[ -n "$CONTAINER_NAME" ] || { printf 'ERROR: --container-name is required\n' >&2; exit 2; }
 for bin in docker nvidia-smi curl python3; do
   command -v "$bin" >/dev/null 2>&1 || { printf 'ERROR: missing required tool: %s\n' "$bin" >&2; exit 2; }
 done
@@ -70,7 +75,7 @@ BASE="http://${HOST}:${PORT}/v1"
 printf '========================================================================\n'
 printf '  vLLM Bring-up Checks\n'
 printf '========================================================================\n'
-printf '  container : %s\n' "$NAME"
+printf '  container : %s\n' "$CONTAINER_NAME"
 printf '  endpoint  : %s\n' "$BASE"
 printf '  expect mdl: %s\n' "${EXPECTED_MODEL:-(not asserted)}"
 printf '  expect gpu: %s\n' "${EXPECTED_GPUS:-(not asserted)}"
@@ -79,20 +84,20 @@ hr
 
 # ---- 1. container running -------------------------------------------------------------
 printf '1. Container state\n'
-RUNNING="$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)"
+RUNNING="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 if [ "$RUNNING" != "true" ]; then
-  fail "container '$NAME' is not running (state=${RUNNING:-absent})"
+  fail "container '$CONTAINER_NAME' is not running (state=${RUNNING:-absent})"
   hr; printf 'Aborting: cannot check a container that is not up.\n'; exit 1
 fi
-CID="$(docker inspect -f '{{.Id}}' "$NAME")"
-STATUS="$(docker inspect -f '{{.State.Status}}' "$NAME")"
+CID="$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME")"
+STATUS="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME")"
 pass "container running (status=$STATUS, id=${CID:0:12})"
 hr
 
 # ---- 2. physical GPU placement by PID-join --------------------------------------------
 printf '2. GPU placement (PID-join, empirical)\n'
 # host PIDs belonging to the container
-CONTAINER_PIDS="$(docker top "$NAME" 2>/dev/null | awk 'NR>1{print $2}' | sort -u)"
+CONTAINER_PIDS="$(docker top "$CONTAINER_NAME" 2>/dev/null | awk 'NR>1{print $2}' | sort -u)"
 if [ -z "$CONTAINER_PIDS" ]; then
   warn "docker top returned no PIDs for the container"
 fi
